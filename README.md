@@ -17,6 +17,9 @@ A Minecraft server mod/plugin manager for the CIFS-mounted instances at `/mnt/mi
 
 Build artifacts are listed with checksums in `dist/SHA256SUMS`.
 
+GitHub: https://github.com/Shemhazaii/mcman
+Release v0.2.0: https://github.com/Shemhazaii/mcman/releases/tag/v0.2.0
+
 ### Linux AppImage
 `dist/mcman.AppImage` — portable AppImage (x86-64), built in a `rust:1-bookworm` Docker container so it links an older glibc and runs on Ubuntu/Debian.
 
