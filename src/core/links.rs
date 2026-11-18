@@ -91,11 +91,6 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
                     if !n.is_empty() { display_name = Some(n.to_string()); }
                 }
             }
-            if display_version.is_none() {
-                if let Some(v) = item.get("installed").and_then(|v| v.as_str()) {
-                    if !v.is_empty() { display_version = Some(v.to_string()); }
-                }
-            }
             if url.is_none() {
                 match item.get("source").and_then(|v| v.as_str()) {
                     Some("modrinth") => {

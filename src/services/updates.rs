@@ -188,6 +188,58 @@ fn set_check_phase(name: &str, phase: &str, done: u64, total: u64, cur: Option<S
     }
 }
 
+fn normalized_version(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let mut out = Vec::new();
+    for raw in lower.split(|c: char| c == '+' || c == '_' || c == '-' || c == ' ' || c == ',').filter(|t| !t.is_empty()) {
+        let t = raw.trim_start_matches("mc");
+        if t.is_empty() { continue; }
+        if matches!(t, "neoforge" | "forge" | "fabric" | "quilt" | "bukkit" | "paper" | "spigot" | "release") {
+            continue;
+        }
+        if t.starts_with("build.") { continue; }
+        if is_mc_version_token(t) { continue; }
+        let t = t.trim_start_matches('v');
+        if t.is_empty() { continue; }
+        out.push(t.to_string());
+    }
+    out.join(" ")
+}
+
+fn is_mc_version_token(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('.').collect();
+    if parts.len() >= 2 && parts[0] == "1" {
+        if let Ok(second) = parts[1].parse::<u32>() {
+            return second >= 16;
+        }
+    }
+    false
+}
+
+fn version_parts(s: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for token in normalized_version(s).split_whitespace() {
+        for part in token.split('.') {
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() { break; }
+            if let Ok(n) = digits.parse::<u64>() { out.push(n); } else { break; }
+        }
+    }
+    out
+}
+
+fn version_newer(latest: &str, installed: &str) -> bool {
+    let a = normalized_version(latest);
+    let b = normalized_version(installed);
+    if a.is_empty() || b.is_empty() || a == b { return false; }
+    let pa = version_parts(&a);
+    let pb = version_parts(&b);
+    if !pa.is_empty() && !pb.is_empty() {
+        return pa > pb;
+    }
+    a > b
+}
+
 fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), AppError> {
     let inst = instance_dir(name)?;
     let (loader, mcver) = instance_loader_mc(name)?;
@@ -220,10 +272,18 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
         let filename = m["file"].as_str().unwrap().to_string();
         let mut source = String::new();
         let mut project = String::new();
+        let mut installed = m["version"].clone();
+        let mut display_name = m["name"].clone();
 
         if let Some(link) = links.get(format!("{name}|{filename}")) {
             source = link.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
             project = link.get("project").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if let Some(v) = link.get("version").and_then(|v| v.as_str()) {
+                if !v.is_empty() { installed = json!(v); }
+            }
+            if let Some(n) = link.get("name").and_then(|v| v.as_str()) {
+                if !n.is_empty() { display_name = json!(n); }
+            }
         }
 
         if project.is_empty() {
@@ -242,8 +302,8 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
 
         let mut item = json!({
             "file": filename,
-            "name": m["name"],
-            "installed": m["version"],
+            "name": display_name,
+            "installed": installed,
             "known": known,
             "project": if known { json!(project) } else { Value::Null },
             "latest": null,
@@ -343,7 +403,9 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
                 item["latest_url"] = primary["url"].clone();
                 item["latest_filename"] = primary["filename"].clone();
             }
-            if lv["version_number"] != item["installed"] {
+            let installed = item["installed"].as_str().unwrap_or("");
+            let latest_version = lv["version_number"].as_str().unwrap_or("");
+            if version_newer(latest_version, installed) {
                 item["update"] = lv["version_number"].clone();
             }
         }
