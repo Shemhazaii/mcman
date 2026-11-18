@@ -24,13 +24,13 @@ pub fn sha1_file(path: &Path) -> Result<String, AppError> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn size_and_mtime(path: &Path) -> (u64, i64) {
-    let md = path.metadata().unwrap();
+fn size_and_mtime(path: &Path) -> Result<(u64, i64), AppError> {
+    let md = fs::metadata(path).map_err(AppError::from)?;
     let mtime = md.modified().ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
-    (md.len(), mtime)
+    Ok((md.len(), mtime))
 }
 
 pub fn load_hash_cache() -> Value {
@@ -45,7 +45,7 @@ pub fn save_hash_cache(cache: &Value) {
 
 /// SHA-1 for a path, reusing the cache when size and mtime match.
 pub fn cached_sha1(path: &Path, cache: &mut Value) -> Result<String, AppError> {
-    let (size, mtime) = size_and_mtime(path);
+    let (size, mtime) = size_and_mtime(path)?;
     let key = path.display().to_string();
 
     if let Some(entry) = cache.get(&key) {
@@ -98,7 +98,7 @@ pub fn murmur2(data: &[u8]) -> u32 {
 
 /// CurseForge fingerprint for a path, cached by size and mtime.
 pub fn cached_fingerprint(path: &Path, cache: &mut Value) -> Result<u32, AppError> {
-    let (size, mtime) = size_and_mtime(path);
+    let (size, mtime) = size_and_mtime(path)?;
     let key = path.display().to_string();
 
     if let Some(entry) = cache.get(&key) {

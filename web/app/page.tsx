@@ -5,6 +5,7 @@ import { api, post, query } from "../lib/api";
 import type {
   BatchStatus,
   CartItem,
+  CheckProgressState,
   DiffRow,
   InstanceInfo,
   ModRow,
@@ -19,6 +20,7 @@ import { AddModView } from "../components/AddModView";
 import { TrashView } from "../components/TrashView";
 import { DiffView } from "../components/DiffView";
 import { ProgressOverlay } from "../components/ProgressOverlay";
+import { CheckProgressOverlay } from "../components/CheckProgressOverlay";
 import { ConfigModal } from "../components/ConfigModal";
 import { VersionModal } from "../components/VersionModal";
 import { OrphansModal } from "../components/OrphansModal";
@@ -61,6 +63,7 @@ function PageContent() {
   const [sortDir, setSortDir] = useState<1 | -1>(1);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [statusText, setStatusText] = useState("");
+  const [checkProgress, setCheckProgress] = useState<CheckProgressState | null>(null);
 
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [hitsSource, setHitsSource] = useState<"modrinth" | "curseforge">("modrinth");
@@ -163,21 +166,48 @@ function PageContent() {
 
   async function checkUpdates() {
     if (!selected) return;
+    const checking = selected;
     setStatusText(t("status_checking"));
+    setCheckProgress({
+      status: "running",
+      instance: checking,
+      phase: "hashing",
+      done: 0,
+      total: 0,
+      cur: null,
+    });
     try {
-      let state = await api<UpdatesState>(`/api/updates/${encodeURIComponent(selected)}?force=1`);
+      let state = await api<UpdatesState>(`/api/updates/${encodeURIComponent(checking)}?force=1`);
       while (state.status === "checking") {
         const counts = state.total ? ` ${state.done}/${state.total}` : "";
         setStatusText(`${state.phase || "checking"}${counts}…`);
-        await delay(800);
-        state = await api<UpdatesState>(`/api/updates/${encodeURIComponent(selected)}`);
+        setCheckProgress({
+          status: "running",
+          instance: checking,
+          phase: state.phase || "hashing",
+          done: Number(state.done) || 0,
+          total: Number(state.total) || 0,
+          cur: state.cur || null,
+        });
+        await delay(400);
+        state = await api<UpdatesState>(`/api/updates/${encodeURIComponent(checking)}`);
       }
       if (state.status !== "done") {
         toast(t("status_check_failed", { e: state.error || state.status }), true);
         setStatusText("");
+        setCheckProgress(null);
         return;
       }
       setUpdates(state);
+      const total = Number(state.total) || 0;
+      setCheckProgress({
+        status: "done",
+        instance: checking,
+        phase: "done",
+        done: Number(state.done) || total,
+        total,
+        cur: null,
+      });
       const updateCount = Object.values(state.items || {}).filter((item) => item.update).length;
       const unknownCount = Object.values(state.items || {}).filter((item) => !item.known).length;
       setStatusText(
@@ -186,9 +216,11 @@ function PageContent() {
           time: new Date((state.ts || 0) * 1000).toLocaleTimeString(),
         }) + (unknownCount ? t("status_unknown", { n: unknownCount }) : "")
       );
+      setTimeout(() => setCheckProgress(null), 2000);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), true);
       setStatusText("");
+      setCheckProgress(null);
     }
   }
 
@@ -915,6 +947,7 @@ function PageContent() {
         </div>
       </div>
 
+      <CheckProgressOverlay job={checkProgress} />
       <ProgressOverlay job={progress} />
 
       <div id="msg">

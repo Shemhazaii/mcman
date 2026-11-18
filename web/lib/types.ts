@@ -46,7 +46,17 @@ export interface UpdatesState {
   phase?: string;
   done?: number;
   total?: number;
+  cur?: string | null;
   error?: string;
+}
+
+export interface CheckProgressState {
+  status: "running" | "done";
+  instance: string;
+  phase: string;
+  done: number;
+  total: number;
+  cur: string | null;
 }
 
 export interface SearchHit {

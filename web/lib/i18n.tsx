@@ -135,6 +135,11 @@ const DICT: Record<string, Entry> = {
   phase_cache: { id: "menulis data update", en: "writing update data" },
   phase_done: { id: "selesai", en: "done" },
   phase_error: { id: "gagal", en: "error" },
+  phase_hashing: { id: "hash jar", en: "hashing jars" },
+  phase_version_files: { id: "cocokkan hash ke Modrinth", en: "matching hashes to Modrinth" },
+  phase_latest: { id: "ambil versi terbaru", en: "fetching latest versions" },
+  phase_curseforge: { id: "cocokkan fingerprint CurseForge", en: "matching CurseForge fingerprints" },
+  check_done: { id: "✓ selesai — update check", en: "✓ done — update check" },
 
   toast_root: { id: "root → {p}", en: "root → {p}" },
   toast_native_unavailable: {

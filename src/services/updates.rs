@@ -9,8 +9,8 @@ use serde_json::{json, Map, Value};
 
 use crate::core::errors::AppError;
 use crate::core::hashing;
-use crate::core::instances::{instance_dir, instance_loader_mc, mod_dir};
-use crate::core::mods::list_mod_rows;
+use crate::core::instances::{instance_dir, instance_loader_mc};
+use crate::core::mods::{list_mod_rows, mod_file_path};
 use crate::providers::curseforge;
 use crate::providers::http::modrinth_get;
 use crate::core::state::{APP, now_seconds, read_json};
@@ -138,10 +138,10 @@ fn mods_fingerprint(name: &str) -> Option<String> {
 }
 
 fn run_update_check(name: String) {
-    let result = run_update_check_inner(&name);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_update_check_inner(&name)));
     let mut updates = APP.updates.lock().unwrap();
     match result {
-        Ok((items, scan_fingerprint)) => {
+        Ok(Ok((items, scan_fingerprint))) => {
             let status = json!({
                 "status": "done",
                 "ts": now_seconds(),
@@ -152,11 +152,18 @@ fn run_update_check(name: String) {
             let _ = fs::create_dir_all(&APP.state_dir);
             let _ = fs::write(cache_path(&name), status.to_string());
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             updates.insert(name.clone(), json!({
                 "status": "error",
                 "ts": now_seconds(),
                 "error": e.to_string(),
+            }));
+        }
+        Err(_) => {
+            updates.insert(name.clone(), json!({
+                "status": "error",
+                "ts": now_seconds(),
+                "error": "update check crashed unexpectedly",
             }));
         }
     }
@@ -169,13 +176,14 @@ fn set_error(name: &str, message: String) {
     }
 }
 
-fn set_check_phase(name: &str, phase: &str, done: u64, total: u64) {
+fn set_check_phase(name: &str, phase: &str, done: u64, total: u64, cur: Option<String>) {
     let mut updates = APP.updates.lock().unwrap();
     if let Some(entry) = updates.get_mut(name) {
         if entry.get("status") == Some(&json!("checking")) {
             entry["phase"] = json!(phase);
             entry["done"] = json!(done);
             entry["total"] = json!(total);
+            entry["cur"] = cur.map(Value::String).unwrap_or(Value::Null);
         }
     }
 }
@@ -204,15 +212,22 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     let mut hashes: HashMap<String, String> = HashMap::new();
     let mod_count = mods.len() as u64;
 
-    set_check_phase(name, "hashing", 0, mod_count);
+    set_check_phase(name, "hashing", 0, mod_count, None);
     for (i, m) in mods.iter().enumerate() {
-        let path = mod_dir(&inst)
-            .unwrap_or_else(|| inst.join("mods"))
-            .join(m["file"].as_str().unwrap());
+        let filename = m["file"].as_str().unwrap().to_string();
+        set_check_phase(name, "hashing", i as u64, mod_count, Some(filename.clone()));
+        let path = match mod_file_path(&inst, &filename) {
+            Ok(p) => p,
+            Err(e) => {
+                set_error(name, format!("hash path for {filename}: {e}"));
+                set_check_phase(name, "hashing", (i as u64) + 1, mod_count, Some(filename));
+                continue;
+            }
+        };
         if let Ok(h) = hashing::cached_sha1(&path, &mut hash_cache) {
-            hashes.insert(m["file"].as_str().unwrap().to_string(), h);
+            hashes.insert(filename.clone(), h);
         }
-        set_check_phase(name, "hashing", (i as u64) + 1, mod_count);
+        set_check_phase(name, "hashing", (i as u64) + 1, mod_count, Some(filename));
     }
     hashing::save_hash_cache(&hash_cache);
 
@@ -222,7 +237,7 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     hash_list.dedup();
     let chunk_count = ((hash_list.len() + 99) / 100) as u64;
 
-    set_check_phase(name, "version_files", 0, chunk_count);
+    set_check_phase(name, "version_files", 0, chunk_count, None);
     for (i, chunk) in hash_list.chunks(100).enumerate() {
         match crate::providers::http::modrinth_post(
             "/version_files",
@@ -232,7 +247,7 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
             Ok(_) => {}
             Err(e) => set_error(name, format!("version_files: {e}")),
         }
-        set_check_phase(name, "version_files", (i as u64) + 1, chunk_count);
+        set_check_phase(name, "version_files", (i as u64) + 1, chunk_count, Some(format!("chunk {}/{}", i + 1, chunk_count)));
     }
 
     let mut items: Map<String, Value> = Map::new();
@@ -267,6 +282,17 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
         items.insert(filename.to_string(), item);
     }
 
+    let project_names: HashMap<String, String> = items.values()
+        .filter_map(|it| {
+            let pid = it.get("project").and_then(|p| p.as_str()).map(|s| s.to_string())?;
+            let display = it.get("installed_name")
+                .and_then(|n| n.as_str())
+                .or_else(|| it.get("name").and_then(|n| n.as_str()))
+                .unwrap_or("").to_string();
+            Some((pid, display))
+        })
+        .collect();
+
     let mut projects: Vec<Value> = items.values()
         .filter_map(|it| it.get("project").cloned())
         .filter(|p| *p != Value::Null)
@@ -278,7 +304,7 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     if !loader.is_empty() {
         let mut latest_cache = load_latest_cache();
         let project_count = projects.len() as u64;
-        set_check_phase(name, "latest", 0, project_count);
+        set_check_phase(name, "latest", 0, project_count, None);
 
         for (i, project) in projects.iter().enumerate() {
             let pid = project.as_str().unwrap_or("").to_string();
@@ -312,8 +338,9 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
                 }
             }
 
-            if let Some(v) = resolved { latest.insert(pid, v); }
-            set_check_phase(name, "latest", (i as u64) + 1, project_count);
+            if let Some(v) = resolved { latest.insert(pid.clone(), v); }
+            let current = project_names.get(&pid).cloned().unwrap_or(pid.clone());
+            set_check_phase(name, "latest", (i as u64) + 1, project_count, Some(current));
         }
         save_latest_cache(&latest_cache);
     }
@@ -334,7 +361,7 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     }
 
     if APP.curseforge_key().is_some() {
-        set_check_phase(name, "curseforge", 0, 0);
+        set_check_phase(name, "curseforge", 0, 0, None);
         curseforge::match_unknown(&inst, &mods, &mut items, &mut hash_cache, &loader, &mcver, name);
     }
 
