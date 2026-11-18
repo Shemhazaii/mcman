@@ -12,7 +12,7 @@ use crate::core::instances::{instance_dir, instance_loader_mc};
 use crate::core::mods::{list_mod_rows, parse_mod_name};
 use crate::core::links;
 use crate::providers::curseforge;
-use crate::providers::http::modrinth_get;
+use crate::providers::http::{modrinth_get, curseforge_post};
 use crate::core::state::{APP, now_seconds, read_json};
 use crate::services::versions;
 
@@ -297,8 +297,15 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
             }
         }
 
-        let known = !project.is_empty() && !source.is_empty()
-            && (source != "curseforge" || project.parse::<u64>().is_ok());
+        if !project.is_empty() {
+            source = if project.chars().all(|c| c.is_ascii_digit()) {
+                "curseforge".to_string()
+            } else {
+                "modrinth".to_string()
+            };
+        }
+
+        let known = !project.is_empty();
 
         let mut item = json!({
             "file": filename,
@@ -322,6 +329,55 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
 
     project_keys.sort();
     project_keys.dedup();
+
+    let mut names = links::names_cache();
+    let mut modrinth_ids: Vec<String> = project_keys.iter()
+        .filter(|(_, pid)| !pid.chars().all(|c| c.is_ascii_digit()))
+        .map(|(_, pid)| pid.clone())
+        .collect();
+    let mut curseforge_ids: Vec<Value> = project_keys.iter()
+        .filter(|(_, pid)| pid.chars().all(|c| c.is_ascii_digit()) && !pid.is_empty())
+        .filter_map(|(_, pid)| pid.parse::<u64>().ok().map(|v| json!(v)))
+        .collect();
+    modrinth_ids.sort();
+    modrinth_ids.dedup();
+    curseforge_ids.sort_by_key(|v| v.as_u64().unwrap_or(0));
+    curseforge_ids.dedup();
+
+    for chunk in modrinth_ids.chunks(50) {
+        if let Ok(v) = modrinth_get("/projects", &[("ids", json!(chunk).to_string())]) {
+            for p in v.as_array().cloned().unwrap_or_default() {
+                let id = p.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let title = p.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                if !id.is_empty() && !title.is_empty() {
+                    names[format!("modrinth:{id}")] = json!(title);
+                }
+            }
+        }
+    }
+
+    for chunk in curseforge_ids.chunks(50) {
+        if let Ok(res) = curseforge_post("/mods", &json!({ "modIds": chunk })) {
+            for m in res.get("data").and_then(|x| x.as_array()).cloned().unwrap_or_default() {
+                let id = m.get("id").and_then(|x| x.as_u64()).map(|x| x.to_string()).unwrap_or_default();
+                let title = m.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                if !id.is_empty() && !title.is_empty() {
+                    names[format!("curseforge:{id}")] = json!(title);
+                }
+            }
+        }
+    }
+    links::save_names(&names);
+
+    for item in items.values_mut() {
+        let pid = item.get("project").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        if !pid.is_empty() {
+            let key = links::project_cache_key(&pid);
+            if let Some(n) = names.get(&key).and_then(|v| v.as_str()) {
+                if !n.is_empty() { item["name"] = json!(n); }
+            }
+        }
+    }
 
     let mut latest: HashMap<String, Value> = HashMap::new();
     if !loader.is_empty() {

@@ -135,13 +135,17 @@ pub fn install(
 
     let fname = dest.file_name().unwrap().to_string_lossy().to_string();
     let installed_version = versions[0].get("version_number").and_then(|v| v.as_str()).unwrap_or("");
+    let project_title = match modrinth_get(&format!("/project/{pid}"), &[]) {
+        Ok(v) => v.get("title").and_then(|x| x.as_str()).unwrap_or(title).to_string(),
+        Err(_) => title.to_string(),
+    };
     links::save_link(
         instance_name,
         &fname,
         &format!("https://modrinth.com/mod/{pid}"),
         "modrinth",
         Some(&pid),
-        Some(title),
+        Some(&project_title),
         Some(installed_version),
     );
 

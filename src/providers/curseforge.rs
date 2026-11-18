@@ -337,8 +337,12 @@ pub fn install(
             chosen.get("displayName").and_then(|x| x.as_str()).unwrap_or("").to_string()
         }
     };
+    let project_title = match curseforge_get(&format!("/mods/{pid}"), &[]) {
+        Ok(res) => res.get("data").and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or(title).to_string(),
+        Err(_) => title.to_string(),
+    };
     if let Some(url) = mod_url(mod_id) {
-        links::save_link(instance_name, &fname, &url, "curseforge", Some(&pid), Some(title), Some(&installed_version));
+        links::save_link(instance_name, &fname, &url, "curseforge", Some(&pid), Some(&project_title), Some(&installed_version));
     }
 
     let mut out = json!({ "file": fname });

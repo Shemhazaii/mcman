@@ -12,6 +12,30 @@ fn links_path() -> PathBuf {
     APP.state_dir.join("links.json")
 }
 
+fn names_path() -> PathBuf {
+    APP.state_dir.join("names.json")
+}
+
+/// Persistent `"source:project" -> official project title` cache.
+pub fn names_cache() -> Value {
+    let v = read_json(&names_path());
+    if v.is_object() { v } else { json!({}) }
+}
+
+pub fn save_names(cache: &Value) {
+    let _ = fs::create_dir_all(&APP.state_dir);
+    let _ = fs::write(names_path(), cache.to_string());
+}
+
+/// CurseForge project IDs are numeric; Modrinth IDs are alphanumeric slugs.
+pub fn project_cache_key(project: &str) -> String {
+    if project.chars().all(|c| c.is_ascii_digit()) {
+        format!("curseforge:{project}")
+    } else {
+        format!("modrinth:{project}")
+    }
+}
+
 /// Persistent mapping of `"instance|file"` to `{url, source, project, name, version}`.
 pub fn links_cache() -> Value {
     let v = read_json(&links_path());
@@ -48,6 +72,7 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
     let status = updates::update_status(instance_name);
     let items = status.get("items").and_then(|v| v.as_object());
     let mut links = links_cache();
+    let names = names_cache();
 
     for row in rows.iter_mut() {
         let file = row.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -116,6 +141,15 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
             if let Some(u) = &url {
                 if let Some(slug) = u.split("/mod/").nth(1) {
                     if !slug.is_empty() { project = Some(slug.to_string()); }
+                }
+            }
+        }
+
+        if display_name.is_none() {
+            if let Some(p) = &project {
+                let key = project_cache_key(p);
+                if let Some(n) = names.get(&key).and_then(|v| v.as_str()) {
+                    if !n.is_empty() { display_name = Some(n.to_string()); }
                 }
             }
         }
