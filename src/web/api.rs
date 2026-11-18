@@ -7,7 +7,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use include_dir::{include_dir, Dir};
 
 use crate::services::cart;
 use crate::services::config_files;
@@ -22,6 +23,7 @@ use crate::services::updates;
 use crate::services::versions;
 
 const PAGE: &str = include_str!("../../static/index.html");
+static STATIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/static");
 
 pub fn router() -> Router {
     Router::new()
@@ -102,24 +104,16 @@ fn content_type(path: &Path) -> &'static str {
 
 /// Serve Next.js static-export assets referenced by index.html as `/_next/...`.
 async fn next_asset_handler(AxPath(path): AxPath<String>) -> Response {
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static").join("_next");
-    let base_canon = match std::fs::canonicalize(&base) {
-        Ok(p) => p,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let candidate = base.join(&path);
-    let canon = match std::fs::canonicalize(&candidate) {
-        Ok(p) => p,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    if !canon.starts_with(&base_canon) || !canon.is_file() {
+    if path.is_empty() || path.contains("..") || path.starts_with('/') {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let data = match tokio::fs::read(&canon).await {
-        Ok(bytes) => bytes,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let rel = format!("_next/{path}");
+    let file = match STATIC_DIR.get_file(&rel) {
+        Some(f) => f,
+        None => return StatusCode::NOT_FOUND.into_response(),
     };
-    ([("content-type", content_type(&canon))], data).into_response()
+    let data = file.contents();
+    ([("content-type", content_type(file.path()))], data).into_response()
 }
 
 async fn instances_handler() -> Result<Json<Value>, GetError> {

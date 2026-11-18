@@ -266,8 +266,15 @@ function applyTheme(mode: ThemeMode) {
 }
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [lang, setLang] = useState<Lang>(() => readStored("mcman-lang", "id") as Lang);
-  const [theme, setTheme] = useState<ThemeMode>(() => readStored("mcman-theme", "dark") as ThemeMode);
+  const [lang, setLang] = useState<Lang>("id");
+  const [theme, setTheme] = useState<ThemeMode>("dark");
+
+  useEffect(() => {
+    const storedLang = readStored("mcman-lang", "id") as Lang;
+    const storedTheme = readStored("mcman-theme", "dark") as ThemeMode;
+    if (storedLang !== lang) setLang(storedLang);
+    if (storedTheme !== theme) setTheme(storedTheme);
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
