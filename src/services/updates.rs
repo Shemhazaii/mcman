@@ -8,9 +8,9 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::core::errors::AppError;
-use crate::core::hashing;
 use crate::core::instances::{instance_dir, instance_loader_mc};
-use crate::core::mods::{list_mod_rows, mod_file_path};
+use crate::core::mods::{list_mod_rows, parse_mod_name};
+use crate::core::links;
 use crate::providers::curseforge;
 use crate::providers::http::modrinth_get;
 use crate::core::state::{APP, now_seconds, read_json};
@@ -208,107 +208,69 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     };
 
     let mods: Vec<Value> = all.into_iter().filter(|m| m["disabled"] != json!(true)).collect();
-    let mut hash_cache = hashing::load_hash_cache();
-    let mut hashes: HashMap<String, String> = HashMap::new();
-    let mod_count = mods.len() as u64;
-
-    set_check_phase(name, "hashing", 0, mod_count, None);
-    for (i, m) in mods.iter().enumerate() {
-        let filename = m["file"].as_str().unwrap().to_string();
-        set_check_phase(name, "hashing", i as u64, mod_count, Some(filename.clone()));
-        let path = match mod_file_path(&inst, &filename) {
-            Ok(p) => p,
-            Err(e) => {
-                set_error(name, format!("hash path for {filename}: {e}"));
-                set_check_phase(name, "hashing", (i as u64) + 1, mod_count, Some(filename));
-                continue;
-            }
-        };
-        if let Ok(h) = hashing::cached_sha1(&path, &mut hash_cache) {
-            hashes.insert(filename.clone(), h);
-        }
-        set_check_phase(name, "hashing", (i as u64) + 1, mod_count, Some(filename));
-    }
-    hashing::save_hash_cache(&hash_cache);
-
-    let mut by_hash: Map<String, Value> = Map::new();
-    let mut hash_list: Vec<String> = hashes.values().cloned().collect();
-    hash_list.sort();
-    hash_list.dedup();
-    let chunk_count = ((hash_list.len() + 99) / 100) as u64;
-
-    set_check_phase(name, "version_files", 0, chunk_count, None);
-    for (i, chunk) in hash_list.chunks(100).enumerate() {
-        match crate::providers::http::modrinth_post(
-            "/version_files",
-            &json!({ "hashes": chunk, "algorithm": "sha1" }),
-        ) {
-            Ok(Value::Object(o)) => by_hash.extend(o),
-            Ok(_) => {}
-            Err(e) => set_error(name, format!("version_files: {e}")),
-        }
-        set_check_phase(name, "version_files", (i as u64) + 1, chunk_count, Some(format!("chunk {}/{}", i + 1, chunk_count)));
-    }
+    let links = links::links_cache();
+    let prev = update_status(name);
+    let prev_items = prev.get("items").and_then(|v| v.as_object());
 
     let mut items: Map<String, Value> = Map::new();
+    let mut project_keys: Vec<(String, String)> = Vec::new();
+    let mut project_names: HashMap<String, String> = HashMap::new();
+
     for m in &mods {
-        let filename = m["file"].as_str().unwrap();
-        let hash = hashes.get(filename);
-        let version = hash.and_then(|h| by_hash.get(h));
+        let filename = m["file"].as_str().unwrap().to_string();
+        let mut source = String::new();
+        let mut project = String::new();
+
+        if let Some(link) = links.get(format!("{name}|{filename}")) {
+            source = link.get("source").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            project = link.get("project").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        }
+
+        if project.is_empty() {
+            if let Some(prev_item) = prev_items.and_then(|m| m.get(&filename)) {
+                if prev_item.get("known") == Some(&json!(true)) {
+                    source = prev_item.get("source").and_then(|v| v.as_str()).unwrap_or(&source).to_string();
+                    project = prev_item.get("project").and_then(|v| v.as_u64()).map(|v| v.to_string())
+                        .or_else(|| prev_item.get("project").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_default();
+                }
+            }
+        }
+
+        let known = !project.is_empty() && !source.is_empty()
+            && (source != "curseforge" || project.parse::<u64>().is_ok());
 
         let mut item = json!({
             "file": filename,
             "name": m["name"],
             "installed": m["version"],
-            "known": version.is_some(),
-            "project": null,
+            "known": known,
+            "project": if known { json!(project) } else { Value::Null },
             "latest": null,
             "update": null,
             "latest_url": null,
             "latest_filename": null,
-            "source": if version.is_some() { Value::String("modrinth".into()) } else { Value::Null },
+            "source": if known { json!(source) } else { Value::Null },
         });
 
-        if let Some(v) = version {
-            item["project"] = v["project_id"].clone();
-            let version_number = v.get("version_number").and_then(|x| x.as_str()).unwrap_or("");
-            item["installed"] = if !version_number.is_empty() {
-                json!(version_number)
-            } else {
-                m["version"].clone()
-            };
-            item["installed_name"] = v.get("name").cloned().unwrap_or(Value::Null);
+        if known {
+            project_keys.push((source.clone(), project.clone()));
+            project_names.insert(project.clone(), filename.clone());
         }
-        items.insert(filename.to_string(), item);
+        items.insert(filename, item);
     }
 
-    let project_names: HashMap<String, String> = items.values()
-        .filter_map(|it| {
-            let pid = it.get("project").and_then(|p| p.as_str()).map(|s| s.to_string())?;
-            let display = it.get("installed_name")
-                .and_then(|n| n.as_str())
-                .or_else(|| it.get("name").and_then(|n| n.as_str()))
-                .unwrap_or("").to_string();
-            Some((pid, display))
-        })
-        .collect();
-
-    let mut projects: Vec<Value> = items.values()
-        .filter_map(|it| it.get("project").cloned())
-        .filter(|p| *p != Value::Null)
-        .collect();
-    projects.sort_by_key(|p| p.to_string());
-    projects.dedup();
+    project_keys.sort();
+    project_keys.dedup();
 
     let mut latest: HashMap<String, Value> = HashMap::new();
     if !loader.is_empty() {
         let mut latest_cache = load_latest_cache();
-        let project_count = projects.len() as u64;
+        let project_count = project_keys.len() as u64;
         set_check_phase(name, "latest", 0, project_count, None);
 
-        for (i, project) in projects.iter().enumerate() {
-            let pid = project.as_str().unwrap_or("").to_string();
-            let cache_key = format!("{pid}|{loader}|{mcver}");
+        for (i, (source, pid)) in project_keys.iter().enumerate() {
+            let cache_key = format!("{source}|{pid}|{loader}|{mcver}");
             let mut resolved: Option<Value> = None;
 
             if let Some(entry) = latest_cache.get(&cache_key) {
@@ -319,27 +281,48 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
             }
 
             if resolved.is_none() {
-                match modrinth_get(
-                    &format!("/project/{pid}/version"),
-                    &{
-                        let mut p = Vec::new();
-                        if !mcver.is_empty() { p.push(("game_versions", json!([mcver]).to_string())); }
-                        if !loader.is_empty() { p.push(("loaders", json!([loader]).to_string())); }
-                        p
-                    },
-                ) {
-                    Ok(Value::Array(vs)) => {
-                        if let Some(v) = vs.into_iter().next() {
-                            latest_cache[cache_key] = json!({ "ts": now_seconds(), "version": v.clone() });
-                            resolved = Some(v);
+                if source == "modrinth" {
+                    match modrinth_get(
+                        &format!("/project/{pid}/version"),
+                        &{
+                            let mut p = Vec::new();
+                            if !mcver.is_empty() { p.push(("game_versions", json!([mcver]).to_string())); }
+                            if !loader.is_empty() { p.push(("loaders", json!([loader]).to_string())); }
+                            p
+                        },
+                    ) {
+                        Ok(Value::Array(vs)) => {
+                            if let Some(v) = vs.into_iter().next() {
+                                resolved = Some(v);
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if source == "curseforge" && APP.curseforge_key().is_some() {
+                    if let Ok(list) = curseforge::files(&json!(pid), &mcver, &loader, 25) {
+                        if let Some(f) = list.first() {
+                            let version = {
+                                let (_, v) = parse_mod_name(f["fileName"].as_str().unwrap_or(""));
+                                if !v.is_empty() {
+                                    v
+                                } else {
+                                    f.get("displayName").and_then(|x| x.as_str()).unwrap_or("").to_string()
+                                }
+                            };
+                            resolved = Some(json!({
+                                "version_number": version,
+                                "files": [f],
+                            }));
                         }
                     }
-                    _ => {}
                 }
             }
 
-            if let Some(v) = resolved { latest.insert(pid.clone(), v); }
-            let current = project_names.get(&pid).cloned().unwrap_or(pid.clone());
+            if let Some(v) = resolved {
+                latest_cache[cache_key] = json!({ "ts": now_seconds(), "version": v.clone() });
+                latest.insert(format!("{source}|{pid}"), v);
+            }
+            let current = project_names.get(pid).cloned().unwrap_or(pid.clone());
             set_check_phase(name, "latest", (i as u64) + 1, project_count, Some(current));
         }
         save_latest_cache(&latest_cache);
@@ -347,10 +330,16 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
 
     for item in items.values_mut() {
         let pid = item.get("project").and_then(|p| p.as_str()).unwrap_or("").to_string();
-        if let Some(lv) = latest.get(&pid) {
+        let source = item.get("source").and_then(|p| p.as_str()).unwrap_or("").to_string();
+        if let Some(lv) = latest.get(&format!("{source}|{pid}")) {
             item["latest"] = lv["version_number"].clone();
             let files = lv.get("files").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            if let Some(primary) = crate::services::dependencies::pick_primary_file(&files) {
+            if source == "curseforge" {
+                if let Some(primary) = files.first() {
+                    item["latest_url"] = json!(curseforge::download_url(primary));
+                    item["latest_filename"] = primary["fileName"].clone();
+                }
+            } else if let Some(primary) = crate::services::dependencies::pick_primary_file(&files) {
                 item["latest_url"] = primary["url"].clone();
                 item["latest_filename"] = primary["filename"].clone();
             }
@@ -358,11 +347,6 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
                 item["update"] = lv["version_number"].clone();
             }
         }
-    }
-
-    if APP.curseforge_key().is_some() {
-        set_check_phase(name, "curseforge", 0, 0, None);
-        curseforge::match_unknown(&inst, &mods, &mut items, &mut hash_cache, &loader, &mcver, name);
     }
 
     Ok((items, scan_fingerprint))
