@@ -1,0 +1,12 @@
+/target
+/web/node_modules
+/web/.next
+/web/out
+/web/tsconfig.tsbuildinfo
+/dist/linux
+/dist/*.log
+/dist/*.bak
+/build_err.txt
+/dist/*.AppImage
+/dist/*.tar.gz
+/dist/*.exe
