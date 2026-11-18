@@ -329,8 +329,16 @@ pub fn install(
     }
 
     let fname = dest.file_name().unwrap().to_string_lossy().to_string();
+    let installed_version = {
+        let (_, v) = mods::parse_mod_name(chosen["fileName"].as_str().unwrap_or(""));
+        if !v.is_empty() {
+            v
+        } else {
+            chosen.get("displayName").and_then(|x| x.as_str()).unwrap_or("").to_string()
+        }
+    };
     if let Some(url) = mod_url(mod_id) {
-        links::save_link(instance_name, &fname, &url, "curseforge", Some(&pid));
+        links::save_link(instance_name, &fname, &url, "curseforge", Some(&pid), Some(title), Some(&installed_version));
     }
 
     let mut out = json!({ "file": fname });

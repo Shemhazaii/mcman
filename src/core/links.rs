@@ -12,19 +12,29 @@ fn links_path() -> PathBuf {
     APP.state_dir.join("links.json")
 }
 
-/// Persistent mapping of `"instance|file"` to `{url, source, project}`.
+/// Persistent mapping of `"instance|file"` to `{url, source, project, name, version}`.
 pub fn links_cache() -> Value {
     let v = read_json(&links_path());
     if v.is_object() { v } else { json!({}) }
 }
 
-pub fn save_link(instance: &str, file: &str, url: &str, source: &str, project: Option<&str>) {
+pub fn save_link(
+    instance: &str,
+    file: &str,
+    url: &str,
+    source: &str,
+    project: Option<&str>,
+    name: Option<&str>,
+    version: Option<&str>,
+) {
     if url.is_empty() { return; }
     let mut links = links_cache();
     links[format!("{instance}|{file}")] = json!({
         "url": url,
         "source": source,
         "project": project.unwrap_or(""),
+        "name": name.unwrap_or(""),
+        "version": version.unwrap_or(""),
     });
     let _ = fs::create_dir_all(&APP.state_dir);
     let _ = fs::write(links_path(), links.to_string());
@@ -45,6 +55,8 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
         let mut url: Option<String> = None;
         let mut source: Option<String> = None;
         let mut project: Option<String> = None;
+        let mut display_name: Option<String> = None;
+        let mut display_version: Option<String> = None;
 
         if let Some(entry) = links.get(&key) {
             if let Some(u) = entry.get("url").and_then(|v| v.as_str()) {
@@ -55,6 +67,12 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
             }
             if let Some(p) = entry.get("project").and_then(|v| v.as_str()) {
                 if !p.is_empty() { project = Some(p.to_string()); }
+            }
+            if let Some(n) = entry.get("name").and_then(|v| v.as_str()) {
+                if !n.is_empty() { display_name = Some(n.to_string()); }
+            }
+            if let Some(v) = entry.get("version").and_then(|v| v.as_str()) {
+                if !v.is_empty() { display_version = Some(v.to_string()); }
             }
         }
 
@@ -67,6 +85,16 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
                     .or_else(|| p.as_str().map(|s| s.to_string()))
                     .filter(|s| !s.is_empty());
                 if pid.is_some() { project = pid; }
+            }
+            if display_name.is_none() {
+                if let Some(n) = item.get("installed_name").and_then(|v| v.as_str()) {
+                    if !n.is_empty() { display_name = Some(n.to_string()); }
+                }
+            }
+            if display_version.is_none() {
+                if let Some(v) = item.get("installed").and_then(|v| v.as_str()) {
+                    if !v.is_empty() { display_version = Some(v.to_string()); }
+                }
             }
             if url.is_none() {
                 match item.get("source").and_then(|v| v.as_str()) {
@@ -102,6 +130,8 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
                 "url": u,
                 "source": source.clone().unwrap_or_default(),
                 "project": project.clone().unwrap_or_default(),
+                "name": display_name.clone().unwrap_or_default(),
+                "version": display_version.clone().unwrap_or_default(),
             });
         } else {
             // Unknown jars are intentionally not resolved here: listing must not
@@ -124,6 +154,12 @@ pub fn attach_urls(instance_name: &str, rows: &mut [Value]) {
             }
             if let Some(s) = entry.get("source").and_then(|v| v.as_str()) {
                 row["source"] = json!(s);
+            }
+            if let Some(n) = entry.get("name").and_then(|v| v.as_str()) {
+                if !n.is_empty() { row["name"] = json!(n); }
+            }
+            if let Some(v) = entry.get("version").and_then(|v| v.as_str()) {
+                if !v.is_empty() { row["version"] = json!(v); }
             }
         }
     }

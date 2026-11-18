@@ -134,12 +134,15 @@ pub fn install(
     }
 
     let fname = dest.file_name().unwrap().to_string_lossy().to_string();
+    let installed_version = versions[0].get("version_number").and_then(|v| v.as_str()).unwrap_or("");
     links::save_link(
         instance_name,
         &fname,
         &format!("https://modrinth.com/mod/{pid}"),
         "modrinth",
         Some(&pid),
+        Some(title),
+        Some(installed_version),
     );
 
     let mut out = json!({ "file": fname });

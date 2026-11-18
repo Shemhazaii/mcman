@@ -164,12 +164,16 @@ pub fn install_modrinth_dependencies(
         added.push(filename.clone());
 
         let instance_name = instance.file_name().unwrap().to_string_lossy().to_string();
+        let dep_name = resolved.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let dep_version = resolved.get("version_number").and_then(|v| v.as_str()).unwrap_or("");
         links::save_link(
             &instance_name,
             &filename,
             &format!("https://modrinth.com/mod/{project_id}"),
             "modrinth",
             Some(&project_id),
+            Some(dep_name),
+            Some(dep_version),
         );
         record_dependency(&instance_name, &filename, parent_file, "modrinth");
     }
@@ -246,8 +250,19 @@ pub fn install_curseforge_dependencies(
         added.push(filename.clone());
 
         let instance_name = instance.file_name().unwrap().to_string_lossy().to_string();
+        let dep_name = chosen.get("displayName").and_then(|v| v.as_str()).unwrap_or("");
+        let dep_version = {
+            let (_, v) = crate::core::mods::parse_mod_name(chosen["fileName"].as_str().unwrap_or(""));
+            if !v.is_empty() {
+                v
+            } else if !dep_name.is_empty() {
+                dep_name.to_string()
+            } else {
+                "".to_string()
+            }
+        };
         if let Some(url) = curseforge::mod_url(&json!(mod_id)) {
-            links::save_link(&instance_name, &filename, &url, "curseforge", Some(&mod_id.to_string()));
+            links::save_link(&instance_name, &filename, &url, "curseforge", Some(&mod_id.to_string()), Some(dep_name), Some(&dep_version));
         }
         record_dependency(&instance_name, &filename, parent_file, "curseforge");
     }
