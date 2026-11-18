@@ -36,6 +36,11 @@ pub fn project_cache_key(project: &str) -> String {
     }
 }
 
+pub fn save_links(cache: &Value) {
+    let _ = fs::create_dir_all(&APP.state_dir);
+    let _ = fs::write(links_path(), cache.to_string());
+}
+
 /// Persistent mapping of `"instance|file"` to `{url, source, project, name, version}`.
 pub fn links_cache() -> Value {
     let v = read_json(&links_path());

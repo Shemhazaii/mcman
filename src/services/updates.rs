@@ -8,11 +8,12 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::core::errors::AppError;
+use crate::core::hashing;
 use crate::core::instances::{instance_dir, instance_loader_mc};
-use crate::core::mods::{list_mod_rows, parse_mod_name};
+use crate::core::mods::{list_mod_rows, mod_file_path, parse_mod_name};
 use crate::core::links;
 use crate::providers::curseforge;
-use crate::providers::http::{modrinth_get, curseforge_post};
+use crate::providers::http::{modrinth_get, modrinth_post, curseforge_post};
 use crate::core::state::{APP, now_seconds, read_json};
 use crate::services::versions;
 
@@ -240,6 +241,184 @@ fn version_newer(latest: &str, installed: &str) -> bool {
     a > b
 }
 
+fn bootstrap_index(
+    name: &str,
+    inst: &Path,
+    mods: &[Value],
+    links: &mut Value,
+    prev_items: Option<&Map<String, Value>>,
+) -> Result<(), AppError> {
+    let mut missing: Vec<String> = Vec::new();
+
+    for m in mods {
+        let file = m["file"].as_str().unwrap().to_string();
+        let key = format!("{name}|{file}");
+        if let Some(entry) = links.get(&key) {
+            let source = entry.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let project = entry.get("project").and_then(|v| v.as_str()).unwrap_or("");
+            if source == "unknown" || !project.is_empty() { continue; }
+        }
+
+        if let Some(pi) = prev_items.and_then(|m| m.get(&file)) {
+            if pi.get("known") == Some(&json!(true)) {
+                let project = pi.get("project").and_then(|v| v.as_u64()).map(|v| v.to_string())
+                    .or_else(|| pi.get("project").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                    .unwrap_or_default();
+                if !project.is_empty() {
+                    let source = if project.chars().all(|c| c.is_ascii_digit()) { "curseforge" } else { "modrinth" };
+                    let url = if source == "curseforge" {
+                        curseforge::mod_url(&json!(project)).unwrap_or_default()
+                    } else {
+                        format!("https://modrinth.com/mod/{project}")
+                    };
+                    links[key] = json!({
+                        "url": url,
+                        "source": source,
+                        "project": project,
+                        "name": pi["name"],
+                        "version": pi["installed"],
+                        "unknown": false,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        missing.push(file);
+    }
+
+    if missing.is_empty() {
+        links::save_links(links);
+        return Ok(());
+    }
+
+    let mut hash_cache = hashing::load_hash_cache();
+    let mut hashes: HashMap<String, String> = HashMap::new();
+    let total = missing.len() as u64;
+    set_check_phase(name, "hashing", 0, total, None);
+
+    for (i, file) in missing.iter().enumerate() {
+        set_check_phase(name, "hashing", i as u64, total, Some(file.clone()));
+        if let Ok(path) = mod_file_path(inst, file) {
+            if let Ok(h) = hashing::cached_sha1(&path, &mut hash_cache) {
+                hashes.insert(file.clone(), h);
+            }
+        }
+        set_check_phase(name, "hashing", (i as u64) + 1, total, Some(file.clone()));
+    }
+    hashing::save_hash_cache(&hash_cache);
+
+    let mut by_hash: Map<String, Value> = Map::new();
+    let mut hash_list: Vec<String> = hashes.values().cloned().collect();
+    hash_list.sort();
+    hash_list.dedup();
+
+    for chunk in hash_list.chunks(100) {
+        if let Ok(v) = modrinth_post("/version_files", &json!({ "hashes": chunk, "algorithm": "sha1" })) {
+            if let Some(o) = v.as_object() {
+                for (k, val) in o { by_hash.insert(k.clone(), val.clone()); }
+            }
+        }
+    }
+
+    for file in &missing {
+        let key = format!("{name}|{file}");
+        if links.get(&key).is_some() { continue; }
+        if let Some(h) = hashes.get(file) {
+            if let Some(v) = by_hash.get(h) {
+                let pid = v.get("project_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if !pid.is_empty() {
+                    let version = v.get("version_number").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    links[key] = json!({
+                        "url": format!("https://modrinth.com/mod/{pid}"),
+                        "source": "modrinth",
+                        "project": pid,
+                        "name": "",
+                        "version": version,
+                        "unknown": false,
+                    });
+                }
+            }
+        }
+    }
+
+    let still_missing: Vec<String> = missing.iter()
+        .filter(|f| links.get(format!("{name}|{f}")).is_none())
+        .cloned()
+        .collect();
+
+    if !still_missing.is_empty() && APP.curseforge_key().is_some() {
+        let mut fingerprints: HashMap<String, u32> = HashMap::new();
+        for file in &still_missing {
+            if let Ok(path) = mod_file_path(inst, file) {
+                if let Ok(fp) = hashing::cached_fingerprint(&path, &mut hash_cache) {
+                    fingerprints.insert(file.clone(), fp);
+                }
+            }
+        }
+        hashing::save_hash_cache(&hash_cache);
+
+        let mut values: Vec<u32> = fingerprints.values().cloned().collect();
+        values.sort();
+        values.dedup();
+        let mut by_fp: HashMap<u32, (Value, Option<String>)> = HashMap::new();
+
+        for chunk in values.chunks(100) {
+            if let Ok(res) = curseforge_post("/fingerprints", &json!({ "fingerprints": chunk })) {
+                let data = res.get("data").cloned().unwrap_or_else(|| json!({}));
+                let fp_list = data.get("exactFingerprints").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                let matches = data.get("exactMatches").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                for (fp_value, entry) in fp_list.iter().zip(matches.iter()) {
+                    let id = entry.get("id").cloned()
+                        .or_else(|| entry.get("file").and_then(|f| f.get("modId")).cloned())
+                        .unwrap_or(Value::Null);
+                    let display = entry.get("file").and_then(|f| f.get("displayName"))
+                        .and_then(|v| v.as_str()).map(|s| s.to_string());
+                    if let Some(fp) = fp_value.as_u64() { by_fp.insert(fp as u32, (id, display)); }
+                }
+            }
+        }
+
+        for file in &still_missing {
+            let key = format!("{name}|{file}");
+            if links.get(&key).is_some() { continue; }
+            if let Some(fp) = fingerprints.get(file) {
+                if let Some((id, display)) = by_fp.get(fp) {
+                    let pid = id.as_u64().map(|x| x.to_string()).unwrap_or_default();
+                    if let Some(url) = curseforge::mod_url(id) {
+                        let (_, ver) = parse_mod_name(file);
+                        links[key] = json!({
+                            "url": url,
+                            "source": "curseforge",
+                            "project": pid,
+                            "name": display.clone().unwrap_or_default(),
+                            "version": ver,
+                            "unknown": false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    for file in &missing {
+        let key = format!("{name}|{file}");
+        if links.get(&key).is_some() { continue; }
+        let (n, v) = parse_mod_name(file);
+        links[key] = json!({
+            "url": "",
+            "source": "unknown",
+            "project": "",
+            "name": n,
+            "version": v,
+            "unknown": true,
+        });
+    }
+
+    links::save_links(links);
+    Ok(())
+}
+
 fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), AppError> {
     let inst = instance_dir(name)?;
     let (loader, mcver) = instance_loader_mc(name)?;
@@ -260,9 +439,11 @@ fn run_update_check_inner(name: &str) -> Result<(Map<String, Value>, String), Ap
     };
 
     let mods: Vec<Value> = all.into_iter().filter(|m| m["disabled"] != json!(true)).collect();
-    let links = links::links_cache();
+    let mut links = links::links_cache();
     let prev = update_status(name);
     let prev_items = prev.get("items").and_then(|v| v.as_object());
+
+    bootstrap_index(name, &inst, &mods, &mut links, prev_items)?;
 
     let mut items: Map<String, Value> = Map::new();
     let mut project_keys: Vec<(String, String)> = Vec::new();
