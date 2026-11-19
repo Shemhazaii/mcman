@@ -1,6 +1,6 @@
 # mcman
 
-A Minecraft server mod/plugin manager for the CIFS-mounted instances at `/mnt/minecraft` (cookcraft, freesia, realcraft, realcraft-exploration, proxy). It runs as a local HTTP server on `127.0.0.1:8765` and also supports a native desktop window.
+A Minecraft server mod/plugin manager for the CIFS-mounted instances at selected folder, for example `/mnt/minecraft`. It runs as a local HTTP server on `127.0.0.1:8765` and also supports a native desktop window.
 
 ## Features
 
